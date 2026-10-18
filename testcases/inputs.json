@@ -1,0 +1,4 @@
+{
+  "default": [[]],
+  "10_config_mode.cpp": [[], ["debug"]]
+}

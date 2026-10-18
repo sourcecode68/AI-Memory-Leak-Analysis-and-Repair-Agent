@@ -92,6 +92,23 @@ python tests/test_tools.py     # 30 checks: path escapes, fixed flags, stale bin
 python tests/test_repair.py    # 24 checks: edit format, each of the five checks, revert, partial then complete fixes
 ```
 
+## Evaluation
+
+`evaluate.py` runs both agents several times on every test program and scores each run against `expected.json`, the ground truth: for each program, the planted problem, the line Valgrind will point to (the allocation) and the lines where the bug really is. The file sits outside `testcases/`, and `read_file` opens only C/C++ files, so the agents never see it.
+
+- **Recording without changing the agents:** while an agent runs, its `execute()` and `call_model()` are temporarily replaced by wrappers that call the real function, record the tool call, tokens or final report, and return the same result.
+- **Analysis runs:** was the problem observed by Valgrind, and does the report's "Root cause" section name a real root-cause line or only the allocation line?
+- **Repair runs:** the program's final status and number of fix attempts, plus flags on the accepted diff: `try`/`catch` added, a function signature changed, a manual `delete` added.
+- **Every written report:** overclaims such as "leak-free", byte counts that differ from what the tools returned, and Valgrind lines that never existed. These checks are pattern matches, so every hit is saved for a person to review.
+
+```bash
+python evaluate.py --only 10_config_mode.cpp --runs 1    # 2 agent runs, about 10 model calls
+python evaluate.py                                       # 10 programs x 3 runs x 2 agents: about 300 model calls
+python evaluate.py --rescore results/<time>.json         # recompute the scores from a saved run; no API calls
+```
+
+Each run writes `results/<time>.json` with every report, tool call and diff. The script prints its estimated number of model calls before starting, and stops early on a daily-quota error.
+
 ## Test programs
 
 | File | Planted problem |
@@ -107,9 +124,11 @@ python tests/test_repair.py    # 24 checks: edit format, each of the five checks
 | `09_list_and_counts.cpp` | only the head of a linked list is freed |
 | `10_config_mode.cpp` | leaks only when run with the argument `debug` |
 
+`testcases/inputs.json` lists the program arguments the repair checks use; `expected.json` holds the ground truth for the evaluation.
+
 ## Results
 
-One evaluation run on 18 Oct 2026 with `gemini-3.1-flash-lite`: each agent ran 3 times on each of the 10 programs. The evaluation script is not part of this repository.
+One evaluation run on 18 Oct 2026 with `gemini-3.1-flash-lite`: each agent ran 3 times on each of the 10 programs (60 agent runs, 287 model calls, about 18 minutes). The results file is not included; results vary between runs.
 
 - **Analysis:** the planted problem was observed in 27 of 27 runs on the 9 buggy programs. Nothing was observed on the clean program in 3 of 3 runs.
 - **Repair:** a fix passing all five checks was accepted in 27 of 27 runs on the 9 buggy programs. No fix was attempted on the clean program in 3 of 3 runs.

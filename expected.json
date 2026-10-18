@@ -1,0 +1,12 @@
+{
+  "01_point.cpp": {"problem": "leak", "alloc_lines": [9], "root_cause_lines": [9, 10, 11], "note": "new Point at line 9 is never deleted"},
+  "02_name_buffer.cpp": {"problem": "leak", "alloc_lines": [6], "root_cause_lines": [6, 11, 12], "note": "malloc(32) at line 6 is never freed"},
+  "03_sum_positive.cpp": {"problem": "leak", "alloc_lines": [4], "root_cause_lines": [6, 7], "note": "the early return at line 7 skips delete[] copy"},
+  "04_labels.cpp": {"problem": "leak", "alloc_lines": [5], "root_cause_lines": [5, 10, 11, 12], "note": "each label returned by make_label is never deleted (5 blocks)"},
+  "05_buffer_process.cpp": {"problem": "leak", "alloc_lines": [19], "root_cause_lines": [10, 11, 20, 21, 22, 23], "note": "fill throws at line 11 (called at line 20), so the deletes at 22-23 are skipped"},
+  "06_scores.cpp": {"problem": "memory error", "alloc_lines": [4], "root_cause_lines": [12], "note": "new int[5] released with delete instead of delete[]; no leak"},
+  "07_partners.cpp": {"problem": "leak", "alloc_lines": [12, 13], "root_cause_lines": [7, 14, 15], "note": "shared_ptr cycle: each Person owns the other"},
+  "08_linked_sum.cpp": {"problem": "none", "alloc_lines": [], "root_cause_lines": [], "note": "control case: everything is released"},
+  "09_list_and_counts.cpp": {"problem": "leak", "alloc_lines": [11], "root_cause_lines": [29], "note": "delete list frees only the head node"},
+  "10_config_mode.cpp": {"problem": "leak", "alloc_lines": [5], "root_cause_lines": [9], "trigger_args": ["debug"], "note": "only with 'debug': line 9 overwrites config without deleting the block from line 5"}
+}

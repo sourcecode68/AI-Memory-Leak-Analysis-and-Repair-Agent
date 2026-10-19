@@ -109,6 +109,56 @@ def test_other_cases():
     check("10: delete[] before reassigning is accepted as fixed", v.get("status") == "fixed", v)
 
 
+def test_limits():
+    print("limits on a fix: size (05) and includes (01)")
+    s = repair.RepairSession("05_buffer_process.cpp")
+    v = s.apply_fix("05_buffer_process.cpp", [edit(s.original, '#include <iostream>\nint main() { std::cout << "x\\n"; }\n')])
+    check(f"rewriting the whole file is refused (over {repair.MAX_CHANGED_LINES} changed lines)", "error" in v, v)
+
+    s = repair.RepairSession("01_point.cpp")
+    secret = repair.WORK_ROOT.parent / "secret.txt"
+    secret.write_text("FAKE_KEY=not-a-real-key\n")
+    tricks = {
+        "a quoted absolute path": f'#include "{secret}"',
+        "a path that climbs out of the header folders": f"#include <{'../' * 8}{str(secret).lstrip('/')}>",
+        "an include built by a macro": f'#define F "{secret}"\n#include F',
+        "an include after a comment": f'/**/ #include "{secret}"',
+        "an include split across lines": f'#inc\\\nlude "{secret}"',
+        "a digraph include": f'%:include "{secret}"',
+    }
+    for name, text in tricks.items():
+        v = s.apply_fix("01_point.cpp", [edit("#include <iostream>", "#include <iostream>\n" + text)])
+        check(f"refuses {name}, without quoting the file", "error" in v and "FAKE_KEY" not in str(v), v)
+    v = s.apply_fix("01_point.cpp", [edit("#include <iostream>", "#include <iostream>\n#include <vectr>")])
+    check("a missing header is named", "vectr" in v.get("error", ""), v)
+    check("refused fixes don't use an attempt", s.attempts == 0, s.attempts)
+
+
+def test_review():
+    print("asking a person before a fix runs (03)")
+    shown = []
+
+    def decline(proposed, explanation):
+        shown.append(proposed)
+        return False, "keep the raw pointer"
+
+    s = repair.RepairSession("03_sum_positive.cpp", approve=decline)
+    binary = tools.BUILD_DIR / "03_sum_positive"
+    built = binary.stat().st_mtime_ns
+    fix = [edit("#include <iostream>", "#include <iostream>\n#include <vector>"),
+           edit("int* copy = new int[n];", "std::vector<int> copy(n);"),
+           edit("    delete[] copy;\n", "")]
+    v = s.apply_fix("03_sum_positive.cpp", fix)
+    check("the person sees the diff", shown and "+    std::vector<int> copy(n);" in shown[0], shown)
+    check("a declined fix sends the person's reason to the model", "keep the raw pointer" in v.get("error", ""), v)
+    check("a declined fix is not written or compiled",
+          s.path.read_text() == s.original and binary.stat().st_mtime_ns == built)
+    check("a declined fix doesn't use an attempt", s.attempts == 0, s.attempts)
+    s.approve = lambda proposed, explanation: (True, "")
+    v = s.apply_fix("03_sum_positive.cpp", fix)
+    check("an approved fix runs and is judged as usual", v.get("status") == "fixed", v)
+
+
 if __name__ == "__main__":
     before = testcases_digest()
     tmp = Path(tempfile.mkdtemp(prefix="leak-agent-repair-test-"))
@@ -120,6 +170,8 @@ if __name__ == "__main__":
         test_new_memory_error_01()
         test_partial_then_complete_09()
         test_other_cases()
+        test_limits()
+        test_review()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     check("testcases/ was never modified", testcases_digest() == before)

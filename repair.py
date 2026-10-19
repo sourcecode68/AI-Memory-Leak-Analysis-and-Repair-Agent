@@ -6,6 +6,7 @@ import difflib
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import tools   # RepairSession switches tools.WORKSPACE, so every tool sees only the work copy
@@ -13,6 +14,8 @@ import tools   # RepairSession switches tools.WORKSPACE, so every tool sees only
 TESTCASES = Path(__file__).resolve().parent / "testcases"
 WORK_ROOT = Path("/tmp/leak-agent/work")
 MAX_ATTEMPTS = 3
+MAX_CHANGED_LINES = 20   # lines removed + added, against the original; the largest accepted fix so far changed 14
+HEADER_DIRS = (Path("/usr/include"), Path("/usr/lib/gcc"))   # where g++ finds the standard headers
 _LINE_PREFIX = re.compile(r"^\s*\d+\| ", re.M)   # the "  9| " that read_file adds
 
 
@@ -69,11 +72,38 @@ def apply_edits(text, edits):
     return text, None
 
 
+def changed_lines(before, after):
+    """Lines removed plus lines added, as a diff counts them."""
+    matcher = difflib.SequenceMatcher(None, before.splitlines(), after.splitlines())
+    return sum((i2 - i1) + (j2 - j1) for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal")
+
+
+def outside_includes(text, work_dir):
+    """Files outside HEADER_DIRS that `text` would #include. Returns (paths, None) or (None, problem).
+
+    Asks the preprocessor (g++ -M lists every file it opens) instead of reading #include lines,
+    so a macro, a comment, a line splice or a digraph can't hide an include.
+    """
+    cmd = ["g++", "-std=c++17", "-M", "-x", "c++", "-"]   # "-": read the candidate from stdin; nothing is written
+    try:
+        r = subprocess.run(cmd, input=text, capture_output=True, text=True,
+                           timeout=tools.COMPILE_TIMEOUT, cwd=work_dir)
+    except subprocess.TimeoutExpired:
+        return None, "checking the #include lines timed out"
+    if r.returncode != 0:
+        # The preprocessor's messages are never passed on: they can quote lines of an included file.
+        missing = [m for m in re.findall(r"fatal error: (\S+): No such file", r.stderr) if m in text]
+        return None, f"no such header: {', '.join(missing)}" if missing else "the preprocessor rejected this fix"
+    deps = r.stdout.split(":", 1)[-1].replace("\\\n", " ").split()   # "-: /usr/include/... \<newline> ..."
+    return [d for d in deps if not any(Path(d).resolve().is_relative_to(root) for root in HEADER_DIRS)], None
+
+
 class RepairSession:
     """All state for repairing one file: the original, the last accepted version, measurements, attempts."""
 
-    def __init__(self, source_name):
+    def __init__(self, source_name, approve=None):
         self.name = source_name
+        self.approve = approve   # approve(diff, explanation) -> (approved, reason), asked before a fix runs; None: don't ask
         self.work_dir = WORK_ROOT / Path(source_name).stem
         shutil.rmtree(self.work_dir, ignore_errors=True)
         self.work_dir.mkdir(parents=True)
@@ -96,8 +126,17 @@ class RepairSession:
         if self.attempts >= MAX_ATTEMPTS:
             return {"error": f"no attempts left: all {MAX_ATTEMPTS} have been used"}
         candidate, problem = apply_edits(self.accepted, edits)
+        if problem is None:
+            problem = self._outside_limits(candidate)
         if problem:
             return {"error": problem, "note": "nothing was changed; this did not use an attempt"}
+        if self.approve is not None:                       # a person sees the fix before it is written or run
+            proposed = "".join(difflib.unified_diff(self.accepted.splitlines(True), candidate.splitlines(True),
+                                                    f"current/{self.name}", f"proposed/{self.name}"))
+            approved, reason = self.approve(proposed, explanation)
+            if not approved:
+                return {"error": "the user declined to run this fix" + (f": {reason}" if reason else ""),
+                        "note": "nothing was changed or run; this did not use an attempt"}
 
         self.attempts += 1
         self.path.write_text(candidate)
@@ -111,6 +150,19 @@ class RepairSession:
         verdict.update(attempt=self.attempts, attempts_left=MAX_ATTEMPTS - self.attempts)
         self.log.append({"explanation": explanation, **verdict})
         return verdict
+
+    def _outside_limits(self, candidate):
+        """Limits on the fix itself, checked before anything is written, compiled or run."""
+        changed = changed_lines(self.original, candidate)
+        if changed > MAX_CHANGED_LINES:
+            return (f"this fix would change {changed} lines of the original (limit {MAX_CHANGED_LINES}); "
+                    "make the smallest change that removes the leak")
+        outside, problem = outside_includes(candidate, self.work_dir)
+        if problem:
+            return problem
+        if outside:
+            return f"only standard headers may be included, not: {', '.join(outside)}"
+        return None
 
     def _judge(self, runs, build_problem):
         """The acceptance checks, in order. The first failure is the reason."""

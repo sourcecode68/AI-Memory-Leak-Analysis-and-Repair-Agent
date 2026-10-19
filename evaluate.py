@@ -194,7 +194,7 @@ def evaluate_repair(name, truth):
     log = io.StringIO()
     with Recorder(repair_agent, execute_takes_map=True) as rec, contextlib.redirect_stdout(log):
         start = time.time()
-        session = repair_agent.run_repair(name)
+        session = repair_agent.run_repair(name, review=False)   # unattended, and its output is captured
     return {
         "agent": "repair", "program": name, "seconds": round(time.time() - start),
         "finished": rec.report is not None, "api_error": rec.api_error,

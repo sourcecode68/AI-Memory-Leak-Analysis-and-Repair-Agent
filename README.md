@@ -37,9 +37,14 @@ The model can only call these four functions. There is no shell access.
 | `read_file(path)` | Returns a source file with line numbers | Path must resolve inside the workspace (blocks `../`, absolute paths and symlinks); C/C++ files only; max 100 KB |
 | `compile_code(source_file)` | Runs `g++ -std=c++17 -g -O0 -Wall -Wextra` | Flags fixed in code; argument list, never a shell string; binaries go to `/tmp/leak-agent/build`; 30 s timeout |
 | `run_valgrind(executable, args)` | Runs a compiled program under `valgrind --leak-check=full` and returns a parsed summary | Only binaries built by `compile_code`; at most 5 arguments of 100 characters; 60 s timeout; output trimmed |
-| `apply_fix(source_file, edits, explanation)` | Applies search-and-replace edits and returns the program's verdict | Repair agent only; each `old_text` must match exactly once; at most 3 attempts |
+| `apply_fix(source_file, edits, explanation)` | Applies search-and-replace edits and returns the program's verdict | Repair agent only; each `old_text` must match exactly once; at most 20 changed lines; standard headers only; shown to you for approval before it runs (unless `--no-review`); at most 3 attempts |
 
 ### The five checks (`repair.py`)
+
+Before anything is written or run, a fix must stay within two limits, or it is refused without using an attempt:
+
+- **Size:** at most 20 lines changed against the original, counted as a diff counts them. The largest accepted fix in the evaluation changed 14.
+- **Includes:** only headers from the standard folders (`/usr/include`, `/usr/lib/gcc`). The check asks `g++ -M` which files the preprocessor would open, so a macro, a comment, a line splice or a digraph can't hide an include. The preprocessor's messages never go back to the model, because a compile error can quote lines of the included file.
 
 A fix is accepted only if, in this order:
 
@@ -51,6 +56,10 @@ A fix is accepted only if, in this order:
 
 A rejected fix is reverted and the program is rebuilt. The rejection reason goes back to the model, which can try again. The files in `testcases/` are never modified; repairs happen in `/tmp/leak-agent/work/`.
 
+### Review before a fix runs
+
+By default, every fix that passes the format and limit checks is shown to you, with the diff and the model's reason, before it is written, compiled or run. Type `y` to run it. Enter declines; any other text declines and is sent to the model as the reason. A declined fix uses no attempt. With review on, the agent refuses to start without a terminal. `--no-review` runs fixes without asking; `evaluate.py` uses it because its runs are unattended.
+
 ## Running it
 
 Requires Linux, Python 3.10+, `g++` and Valgrind (`sudo apt install valgrind`), plus a Gemini API key.
@@ -61,7 +70,8 @@ pip install -r requirements.txt
 export GEMINI_API_KEY=...           # read from the environment, never stored in the code
 
 python leak_agent.py 10_config_mode.cpp      # analysis only
-python repair_agent.py 07_partners.cpp       # analysis + repair
+python repair_agent.py 07_partners.cpp       # analysis + repair; asks before each fix runs
+python repair_agent.py --no-review 07_partners.cpp   # runs fixes without asking
 ```
 
 A real repair run on `07_partners.cpp` (18 Oct 2026). The first fix doesn't compile and is rejected; the second is accepted:
@@ -85,16 +95,16 @@ attempts: 2 of 3
 
 ## Tests
 
-54 deterministic checks with no API calls. They use temporary folders and confirm that `testcases/` is unchanged.
+68 deterministic checks with no API calls. They use temporary folders and confirm that `testcases/` is unchanged.
 
 ```bash
 python tests/test_tools.py     # 30 checks: path escapes, fixed flags, stale binaries, Valgrind parsing, argument limits
-python tests/test_repair.py    # 24 checks: edit format, each of the five checks, revert, partial then complete fixes
+python tests/test_repair.py    # 38 checks: edit format, size and include limits, review before running, each of the five checks, revert, partial then complete fixes
 ```
 
 ## Evaluation
 
-`evaluate.py` runs both agents several times on every test program and scores each run against `expected.json`, the ground truth: for each program, the planted problem, the line Valgrind will point to (the allocation) and the lines where the bug really is. The file sits outside `testcases/`, and `read_file` opens only C/C++ files, so the agents never see it.
+`evaluate.py` runs both agents several times on every test program and scores each run against `expected.json`, the ground truth: for each program, the planted problem, the line Valgrind will point to (the allocation) and the lines where the bug really is. The file sits outside `testcases/`, and `read_file` opens only C/C++ files, so the agents never see it. The repair agent runs with `--no-review` here.
 
 - **Recording without changing the agents:** while an agent runs, its `execute()` and `call_model()` are temporarily replaced by wrappers that call the real function, record the tool call, tokens or final report, and return the same result.
 - **Analysis runs:** was the problem observed by Valgrind, and does the report's "Root cause" section name a real root-cause line or only the allocation line?
@@ -123,6 +133,9 @@ Each run writes `results/<time>.json` with every report, tool call and diff. The
 | `08_linked_sum.cpp` | none: a clean control case |
 | `09_list_and_counts.cpp` | only the head of a linked list is freed |
 | `10_config_mode.cpp` | leaks only when run with the argument `debug` |
+| `11_2d_array.cpp` | the rows of a 2D array are never freed, only the array of row pointers |
+
+`11` is not in `expected.json` yet, so `evaluate.py` does not run it; the results below cover `01`–`10`.
 
 `testcases/inputs.json` lists the program arguments the repair checks use; `expected.json` holds the ground truth for the evaluation.
 
@@ -139,8 +152,8 @@ One evaluation run on 18 Oct 2026 with `gemini-3.1-flash-lite`: each agent ran 3
 
 - Tested only on small single-file programs; there is no build-system support.
 - Valgrind checks only the code paths that actually ran. "0 bytes lost" means no leak was observed on those inputs, not that none exists.
-- The behaviour check is only as strong as the predefined inputs.
+- The behaviour check is only as strong as the predefined inputs. Replacing all of `01_point.cpp` (12 lines) with a program that just prints the expected output changes only 12 lines, so it passes the size limit and every check and is accepted as fixed. The size limit stops whole-file rewrites only in longer programs; inputs the model never sees, or a human review of the diff, would catch it. The model never did this in the evaluation.
 - A fix can pass every check and still be poor style: on `04` the model changed a function's signature in 3 of 3 runs.
 - On a harder LRU-cache program whose leak needs four coordinated pointer fixes, the leak was observed but never fixed. Every wrong fix was rejected.
-- The test programs run as the current user, with no container, network block or memory limit.
+- The test programs, and every proposed fix, run as the current user, with no container, network block or memory limit. With `--no-review`, a fix runs before anyone sees it, and a rejected fix has still run. Review relies on the person reading the diff. The include check stops compile errors from quoting files, but a fix can still open files when it runs.
 - The Gemini free tier allows a limited number of requests per day.

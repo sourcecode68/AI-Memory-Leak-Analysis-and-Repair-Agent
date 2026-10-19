@@ -1,6 +1,7 @@
 """The repair agent: the analysis tools plus apply_fix. The program, not the model, decides the result.
 
-Usage:  python repair_agent.py 07_partners.cpp
+Usage:  python repair_agent.py 07_partners.cpp               # shows you each fix and asks before it runs
+        python repair_agent.py --no-review 07_partners.cpp   # runs fixes without asking
 """
 import sys
 import time
@@ -10,7 +11,7 @@ from google.genai import errors, types
 
 import tools
 from leak_agent import DECLARATIONS as ANALYSIS_DECLARATIONS
-from repair import MAX_ATTEMPTS, RepairSession
+from repair import MAX_ATTEMPTS, MAX_CHANGED_LINES, RepairSession
 
 client = genai.Client()                  # reads GEMINI_API_KEY from the environment
 MODEL = "gemini-3.1-flash-lite"
@@ -27,7 +28,8 @@ Process:
 3. The program, not you, verifies every fix: it recompiles, runs the program under Valgrind on
    predefined inputs, compares the output with the original, and keeps or reverts the fix.
    Read its verdict.
-4. If the fix was rejected, read the reason and try a different fix. If it was accepted with status
+4. If the fix was rejected, read the reason and try a different fix. If the user declined it, nothing
+   ran: follow their reason if they gave one. If it was accepted with status
    "improved", fix what remains. Stop when the status is "fixed", when no attempts are left
    (you have {MAX_ATTEMPTS}), or when Valgrind observed nothing to fix.
 5. Write the final report.
@@ -58,7 +60,9 @@ apply_fix_declaration = {
     "description": "Propose a fix as one or more exact text replacements in the source file. The program applies "
                    "it, recompiles, runs Valgrind on predefined inputs and compares the output with the original. "
                    "It keeps the fix only if the behaviour is unchanged, no new memory error appears, and lost bytes "
-                   "or memory errors decreased; otherwise it reverts the file. Returns the verdict.",
+                   "or memory errors decreased; otherwise it reverts the file. Returns the verdict. "
+                   f"A fix may change at most {MAX_CHANGED_LINES} lines of the original in total and may include "
+                   "only standard headers; a fix outside these limits is refused without using an attempt.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -124,9 +128,28 @@ def summarise(name, outcome):
     return brief or "file content"
 
 
-def run_repair(source_name):
-    """Run the repair loop for one file. Returns the session; its final_status() is the result."""
-    session = RepairSession(source_name)          # copies the file and measures the baseline
+def ask_user(proposed, explanation):
+    """Show a fix before anything runs. Returns (approved, reason); a reason goes back to the model."""
+    if not sys.stdin.isatty():
+        return False, "no one is at the keyboard to approve it"   # fail closed
+    print("\n===== PROPOSED FIX (nothing has run yet) =====")
+    print(proposed, end="")
+    print(f"model's reason: {explanation or '(none given)'}")
+    try:
+        answer = input("Run this fix? [y = yes, Enter = no, or type why not] ").strip()
+    except EOFError:
+        return False, ""
+    if answer.lower() in ("y", "yes"):
+        return True, ""
+    return False, "" if answer.lower() in ("", "n", "no") else answer
+
+
+def run_repair(source_name, review=True):
+    """Run the repair loop for one file. Returns the session; its final_status() is the result.
+
+    With review on, every fix that passes the format and limit checks is shown to the user, and runs only if approved.
+    """
+    session = RepairSession(source_name, approve=ask_user if review else None)   # copies the file, measures the baseline
     tool_map = {
         "read_file": tools.read_file,
         "compile_code": tools.compile_code,
@@ -171,6 +194,11 @@ def run_repair(source_name):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python repair_agent.py <file.cpp in testcases/>")
-    run_repair(sys.argv[1])
+    review = "--no-review" not in sys.argv[1:]
+    files = [a for a in sys.argv[1:] if a != "--no-review"]
+    if len(files) != 1:
+        sys.exit("usage: python repair_agent.py [--no-review] <file.cpp in testcases/>")
+    if review and not sys.stdin.isatty():
+        sys.exit("review is on, so a person must approve each fix at a terminal; "
+                 "use --no-review to run fixes without asking")
+    run_repair(files[0], review)
